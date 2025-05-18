@@ -17,7 +17,7 @@ import os
 import re
 import logging
 
-from utils import get_supabase_client, add_documents_to_supabase, search_documents
+from utils import get_supabase_client, add_documents_to_supabase, search_documents, extract_text_from_pdf, load_csv, load_excel, strip_link_only_lines
 from mcp.server.fastmcp import FastMCP, Context  # Changed C to Context
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 from dotenv import load_dotenv
@@ -79,35 +79,6 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
 
 # Initialize FastMCP server
 
-# # Determine transport mode and settings
-# transport_env = os.getenv("TRANSPORT", "sse").lower()  # Default to sse if not set or empty
-# actual_host: Optional[str] = None
-# actual_port: Optional[int] = None
-# port_str: Optional[str] = None  # Initialize port_str
-
-# if transport_env == "sse":
-#     actual_host = os.getenv("HOST", "0.0.0.0")  # Default host for sse
-#     port_str = os.getenv("PORT", "8051")  # Default port for sse
-#     try:
-#         actual_port = int(port_str)
-#     except ValueError:
-#         logger.warning(f"PORT environment variable ('{port_str}') is not a valid integer. Defaulting to 8051.")
-#         actual_port = 8051
-# elif transport_env == "stdio":
-#     # For stdio, host and port should be None, FastMCP handles this.
-#     actual_host = None
-#     actual_port = None
-# else:
-#     logger.warning(f"Invalid TRANSPORT mode '{transport_env}'. Defaulting to 'sse'.")
-#     transport_env = "sse"  # Explicitly set to sse for fallback
-#     actual_host = os.getenv("HOST", "0.0.0.0")
-#     port_str = os.getenv("PORT", "8051")
-#     try:
-#         actual_port = int(port_str)
-#     except ValueError:
-#         logger.warning(f"PORT environment variable ('{port_str}') is not a valid integer. Defaulting to 8051.")
-#         actual_port = 8051
-
 mcp = FastMCP(
     "mcp-crawl4ai-rag-softworks",
     description="MCP server for RAG and web crawling with Crawl4AI",
@@ -167,49 +138,50 @@ def parse_sitemap(sitemap_url: str) -> List[str]:
     return urls
 
 
-def smart_chunk_markdown(text: str, chunk_size: int = 5000) -> List[str]:
-    """Split text into chunks, respecting code blocks and paragraphs."""
-    chunks = []
-    start = 0
-    text_length = len(text)
-
-    while start < text_length:
-        # Calculate end position
-        end = start + chunk_size
-
-        # If we're at the end of the text, just take what's left
-        if end >= text_length:
-            chunks.append(text[start:].strip())
-            break
-
-        # Try to find a code block boundary first (```)
-        chunk = text[start:end]
-        code_block = chunk.rfind('```')
-        if code_block != -1 and code_block > chunk_size * 0.3:
-            end = start + code_block
-
-        # If no code block, try to break at a paragraph
-        elif '\n\n' in chunk:
-            # Find the last paragraph break
-            last_break = chunk.rfind('\n\n')
-            if last_break > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
-                end = start + last_break
-
-        # If no paragraph break, try to break at a sentence
-        elif '. ' in chunk:
-            # Find the last sentence break
-            last_period = chunk.rfind('. ')
-            if last_period > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
-                end = start + last_period + 1
-
-        # Extract chunk and clean it up
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-
-        # Move start position for next chunk
-        start = end
-
+def smart_chunk_markdown(text: str, chunk_size: int = 5000, overlap: int = 200) -> List[str]:
+    """Split text into chunks by headings, respecting code blocks, paragraphs, sentences, and adding overlap."""
+    chunks: List[str] = []
+    # First split by level-2 headings to respect logical sections
+    sections = re.split(r'(?m)^(##\s+)', text)
+    # Reconstruct sections preserving headers
+    logical_units = []
+    if len(sections) > 1:
+        for i in range(1, len(sections), 2):
+            header = sections[i]
+            body = sections[i+1] if i+1 < len(sections) else ''
+            logical_units.append(header + body)
+    else:
+        logical_units = [text]
+    # Chunk each logical unit with overlap
+    for unit in logical_units:
+        start = 0
+        length = len(unit)
+        while start < length:
+            end = min(start + chunk_size, length)
+            segment = unit[start:end]
+            # attempt breakpoints inside segment
+            # code block boundary
+            cb = segment.rfind('```')
+            if cb != -1 and cb > chunk_size * 0.3:
+                end = start + cb
+                segment = unit[start:end]
+            # paragraph
+            elif '\n\n' in segment:
+                lb = segment.rfind('\n\n')
+                if lb > chunk_size * 0.3:
+                    end = start + lb
+                    segment = unit[start:end]
+            # sentence
+            elif '. ' in segment:
+                lp = segment.rfind('. ')
+                if lp > chunk_size * 0.3:
+                    end = start + lp + 1
+                    segment = unit[start:end]
+            segment = segment.strip()
+            if segment:
+                chunks.append(segment)
+            # move start with overlap
+            start = end - overlap if end < length else end
     return chunks
 
 
@@ -262,8 +234,11 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         result = await crawler.arun(url=url, config=run_config)
 
         if result.success and result.markdown:
-            # Chunk the content
-            chunks = smart_chunk_markdown(result.markdown)
+            # Pre-procesado: eliminar líneas que solo contienen enlaces
+            raw_md = result.markdown
+            clean_md = strip_link_only_lines(raw_md)
+            # Chunk the cleaned content
+            chunks = smart_chunk_markdown(clean_md)
 
             # Prepare data for Supabase
             urls = []
@@ -283,8 +258,14 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                 meta["source"] = urlparse(url).netloc
                 # Handle potential None for current_task or its coroutine
                 current_task = asyncio.current_task()
-                coro_name = current_task.get_coro().__name__ if current_task and hasattr(current_task, 'get_coro') and hasattr(current_task.get_coro(), '__name__') else "unknown_task"
-                meta["crawl_time"] = coro_name
+                coro = None
+                if current_task and hasattr(current_task, 'get_coro'):
+                    try:
+                        coro = current_task.get_coro()
+                    except:
+                        coro = None
+                meta_name = getattr(coro, '__name__', 'unknown_task')
+                meta["crawl_time"] = meta_name
                 metadatas.append(meta)
 
             # Create url_to_full_document mapping
@@ -376,48 +357,46 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 "error": "No content found"
             }, indent=2)
 
-        # Process results and store in Supabase
-        urls = []
-        chunk_numbers = []
-        contents = []
-        metadatas = []
+        # Process results and store in Supabase incrementally
+        # Define batch size for incremental inserts
+        batch_size = 20
         chunk_count = 0
 
         for doc in crawl_results:
             source_url = doc['url']
-            md = doc['markdown']
-            chunks = smart_chunk_markdown(md, chunk_size=chunk_size)
-
+            # Pre-procesado: eliminar líneas de enlaces repetidos
+            raw_md = doc['markdown']
+            clean_md = strip_link_only_lines(raw_md)
+            # Chunk the cleaned markdown
+            chunks = smart_chunk_markdown(clean_md, chunk_size=chunk_size)
+            # prepare batch data per document
+            urls = [source_url] * len(chunks)
+            chunk_numbers = list(range(len(chunks)))
+            contents = chunks
+            metadatas = []
             for i, chunk in enumerate(chunks):
-                urls.append(source_url)
-                chunk_numbers.append(i)
-                contents.append(chunk)
-
-                # Extract metadata
                 meta = extract_section_info(chunk)
                 meta["chunk_index"] = i
                 meta["url"] = source_url
                 meta["source"] = urlparse(source_url).netloc
                 meta["crawl_type"] = crawl_type
-                # Handle potential None for current_task or its coroutine
+                # Safe extraction of coroutine name
                 current_task = asyncio.current_task()
-                coro_name = current_task.get_coro().__name__ if current_task and hasattr(current_task, 'get_coro') and hasattr(current_task.get_coro(), '__name__') else "unknown_task"
-                meta["crawl_time"] = coro_name
+                coro = None
+                if current_task and hasattr(current_task, 'get_coro'):
+                    try:
+                        coro = current_task.get_coro()
+                    except:
+                        coro = None
+                meta_name = getattr(coro, '__name__', 'unknown_task')
+                meta["crawl_time"] = meta_name
                 metadatas.append(meta)
+            # insert this document's chunks right away
+            url_to_full_document = {source_url: raw_md}
+            add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document, batch_size=batch_size)
+            chunk_count += len(chunks)
 
-                chunk_count += 1
-
-        # Create url_to_full_document mapping
-        url_to_full_document = {}
-        for doc in crawl_results:
-            url_to_full_document[doc['url']] = doc['markdown']
-
-        # Add to Supabase
-        # IMPORTANT: Adjust this batch size for more speed if you want! Just don't overwhelm your system or the embedding API ;)
-        batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers,
-                                  contents, metadatas, url_to_full_document, batch_size=batch_size)
-
+        # Finished incremental upload of all pages
         return json.dumps({
             "success": True,
             "url": url,
@@ -642,6 +621,87 @@ async def perform_rag_query(ctx: Context, query: str, source: Optional[str] = No
             "query": query,
             "error": str(e)
         }, indent=2)
+
+
+# New MCP tools for file ingestion
+@mcp.tool()
+async def ingest_pdf(ctx: Context, file_path: str, chunk_size: int = 5000, overlap: int = 200) -> str:
+    """
+    Ingest a PDF file: extract text, split into chunks, embed, and store in Supabase.
+    Args:
+        ctx: MCP context
+        file_path: Local path to the PDF file
+        chunk_size: Maximum characters per chunk
+        overlap: Overlap between chunks
+    Returns:
+        JSON summary of ingestion
+    """
+    supabase_client = ctx.request_context.lifespan_context.supabase_client
+    text = extract_text_from_pdf(file_path)
+    chunks = smart_chunk_markdown(text, chunk_size=chunk_size, overlap=overlap)
+    urls = [file_path] * len(chunks)
+    chunk_numbers = list(range(len(chunks)))
+    contents = chunks
+    metadatas = [
+        {"chunk_index": i, "source": "pdf", "file_path": file_path, "chunk_size": len(c)}
+        for i, c in enumerate(chunks)
+    ]
+    url_to_full_document = {file_path: text}
+    add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+    return json.dumps({"success": True, "file": file_path, "chunks": len(chunks)}, indent=2)
+
+@mcp.tool()
+async def ingest_csv(ctx: Context, file_path: str, chunk_size: int = 5000, overlap: int = 200) -> str:
+    """
+    Ingest a CSV file: load content, split into chunks, embed, and store in Supabase.
+    Args:
+        ctx: MCP context
+        file_path: Local path to the CSV file
+        chunk_size: Maximum characters per chunk
+        overlap: Overlap between chunks
+    Returns:
+        JSON summary of ingestion
+    """
+    supabase_client = ctx.request_context.lifespan_context.supabase_client
+    text = load_csv(file_path)
+    chunks = smart_chunk_markdown(text, chunk_size=chunk_size, overlap=overlap)
+    urls = [file_path] * len(chunks)
+    chunk_numbers = list(range(len(chunks)))
+    contents = chunks
+    metadatas = [
+        {"chunk_index": i, "source": "csv", "file_path": file_path, "chunk_size": len(c)}
+        for i, c in enumerate(chunks)
+    ]
+    url_to_full_document = {file_path: text}
+    add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+    return json.dumps({"success": True, "file": file_path, "chunks": len(chunks)}, indent=2)
+
+@mcp.tool()
+async def ingest_excel(ctx: Context, file_path: str, sheet_name: Optional[str] = None, chunk_size: int = 5000, overlap: int = 200) -> str:
+    """
+    Ingest an Excel file: load specified or all sheets, split into chunks, embed, and store in Supabase.
+    Args:
+        ctx: MCP context
+        file_path: Local path to the Excel file
+        sheet_name: Optional sheet to load; if None, all sheets
+        chunk_size: Maximum characters per chunk
+        overlap: Overlap between chunks
+    Returns:
+        JSON summary of ingestion
+    """
+    supabase_client = ctx.request_context.lifespan_context.supabase_client
+    text = load_excel(file_path, sheet_name)
+    chunks = smart_chunk_markdown(text, chunk_size=chunk_size, overlap=overlap)
+    urls = [file_path] * len(chunks)
+    chunk_numbers = list(range(len(chunks)))
+    contents = chunks
+    metadatas = [
+        {"chunk_index": i, "source": "excel", "file_path": file_path, "chunk_size": len(c)}
+        for i, c in enumerate(chunks)
+    ]
+    url_to_full_document = {file_path: text}
+    add_documents_to_supabase(supabase_client, urls, chunk_numbers, contents, metadatas, url_to_full_document)
+    return json.dumps({"success": True, "file": file_path, "sheets": sheet_name or "all", "chunks": len(chunks)}, indent=2)
 
 
 async def main():
