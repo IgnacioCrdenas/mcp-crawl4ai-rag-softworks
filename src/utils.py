@@ -36,6 +36,10 @@ if EMBEDDINGS_PROVIDER == "bedrock" or CONTEXT_PROVIDER == "bedrock":
         os.environ["AWS_REGION"] = AWS_REGION
 
 # Set default to Claude if CONTEXT_PROVIDER is bedrock and BEDROCK_CONTEXT_MODEL_ID is not set or is deepseek
+# You can also use Nova models for cost-effective context generation:
+# - amazon.nova-micro-v1:0 (text-only, most cost-effective)
+# - amazon.nova-lite-v1:0 (multimodal, fast)
+# - amazon.nova-pro-v1:0 (advanced, multimodal)
 if CONTEXT_PROVIDER == "bedrock":
     if not BEDROCK_CONTEXT_MODEL_ID or BEDROCK_CONTEXT_MODEL_ID.startswith("deepseek"):
         BEDROCK_CONTEXT_MODEL_ID = "anthropic.claude-3-5-sonnet-20240620-v1:0"

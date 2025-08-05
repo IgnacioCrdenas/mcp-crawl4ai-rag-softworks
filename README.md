@@ -35,7 +35,11 @@ The server provides four essential web crawling and search tools:
   - [OpenAI API key](https://platform.openai.com/api-keys) (if using OpenAI for embeddings or context generation)
   - [AWS credentials](https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html) with access to Bedrock models (if using Bedrock for embeddings or context generation).
     - For embeddings, the server uses `amazon.titan-embed-text-v1`.
-    - For context generation, the server is configured to use Claude 3.5 Sonnet via the `BEDROCK_CONTEXT_MODEL_ID` (e.g., `anthropic.claude-3-5-sonnet-20240620-v1:0`).
+    - For context generation, the server supports multiple models:
+      - **Claude**: `anthropic.claude-3-5-sonnet-20240620-v1:0` (high quality)
+      - **Nova Micro**: `amazon.nova-micro-v1:0` (cost-effective, text-only)
+      - **Nova Lite**: `amazon.nova-lite-v1:0` (fast, multimodal)
+      - **Nova Pro**: `amazon.nova-pro-v1:0` (advanced, multimodal)
 
 ## Installation
 
@@ -227,9 +231,98 @@ EMBEDDINGS_PROVIDER="openai"
 CONTEXT_PROVIDER="openai"
 
 # BEDROCK_CONTEXT_MODEL_ID: (Required if CONTEXT_PROVIDER is "bedrock")
-#   Specifies the Claude 3.5 Sonnet model ID for context generation (e.g., "anthropic.claude-3-5-sonnet-20240620-v1:0").
+#   Specifies the model ID for context generation. Examples:
+#     - Claude: "anthropic.claude-3-5-sonnet-20240620-v1:0" (high quality)
+#     - Nova Micro: "amazon.nova-micro-v1:0" (cost-effective, text-only)
+#     - Nova Lite: "amazon.nova-lite-v1:0" (fast, multimodal)
+#     - Nova Pro: "amazon.nova-pro-v1:0" (advanced, multimodal)
 BEDROCK_CONTEXT_MODEL_ID="anthropic.claude-3-5-sonnet-20240620-v1:0"
 ```
+
+## Amazon Nova Models Usage
+
+Amazon Nova models provide cost-effective alternatives to Claude for context generation. Here are practical examples:
+
+### Nova Micro (Cost-Optimized)
+
+Perfect for high-volume, basic context generation with up to **86% cost savings** compared to Claude:
+
+```bash
+# Configuration for maximum cost savings
+CONTEXT_PROVIDER="bedrock"
+BEDROCK_CONTEXT_MODEL_ID="amazon.nova-micro-v1:0"
+AWS_REGION="us-east-1"
+```
+
+**Use Cases:**
+- Startups with budget constraints
+- High-frequency RAG operations
+- Simple content summarization
+- Basic keyword extraction
+
+### Nova Lite (Multimodal & Fast)
+
+Ideal for documents containing images, diagrams, or mixed content:
+
+```bash
+# Configuration for multimodal content
+CONTEXT_PROVIDER="bedrock"
+BEDROCK_CONTEXT_MODEL_ID="amazon.nova-lite-v1:0"
+```
+
+**Use Cases:**
+- Technical documentation with diagrams
+- Marketing materials with images
+- Mixed content processing
+- Fast content analysis
+
+### Nova Pro (Advanced Analysis)
+
+For complex documents requiring sophisticated understanding:
+
+```bash
+# Configuration for complex analysis
+CONTEXT_PROVIDER="bedrock"
+BEDROCK_CONTEXT_MODEL_ID="amazon.nova-pro-v1:0"
+```
+
+**Use Cases:**
+- Legal documents
+- Research papers
+- Complex technical specifications
+- Detailed content analysis
+
+### Migration Example
+
+Quick migration from Claude to Nova for cost optimization:
+
+```bash
+# Before (Claude)
+BEDROCK_CONTEXT_MODEL_ID="anthropic.claude-3-5-sonnet-20240620-v1:0"
+
+# After (Nova Micro - 86% cheaper)
+BEDROCK_CONTEXT_MODEL_ID="amazon.nova-micro-v1:0"
+```
+
+### Docker Example with Nova
+
+```bash
+docker run -d \
+  --name crawl4ai-rag-nova \
+  -p 8051:8051 \
+  -e CONTEXT_PROVIDER="bedrock" \
+  -e BEDROCK_CONTEXT_MODEL_ID="amazon.nova-micro-v1:0" \
+  -e AWS_ACCESS_KEY_ID="your_aws_key" \
+  -e AWS_SECRET_ACCESS_KEY="your_aws_secret" \
+  -e AWS_REGION="us-east-1" \
+  -e SUPABASE_URL="your_supabase_url" \
+  -e SUPABASE_SERVICE_KEY="your_supabase_key" \
+  ignaciocardenas/mcp-crawl4ai-rag-softworks:latest
+```
+
+For detailed Nova implementation examples, troubleshooting, and cost analysis, see:
+- [Nova Usage Examples Guide](docs/NOVA_USAGE_EXAMPLES.md) - Comprehensive documentation
+- [Examples Directory](examples/) - Practical configuration files and scripts
 
 ## Running the Server
 
