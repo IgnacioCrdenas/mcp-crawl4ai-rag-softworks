@@ -1,11 +1,11 @@
 import os
 import json
-from json import JSONDecodeError  # Added JSONDecodeError
-from typing import List, Optional, Any, Dict
-import logging
-import boto3
 import time  # Added for sleep
 import random  # Added for jitter
+from json import JSONDecodeError  # Added JSONDecodeError
+from typing import List, Optional
+import logging
+import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError, BotoCoreError
 
 logger = logging.getLogger(__name__)  # Standard logger
@@ -86,7 +86,7 @@ def invoke_bedrock_model(
     region: Optional[str] = None
 ) -> Optional[str]:
     """
-    Invokes the AWS Bedrock model (Claude or DeepSeek) for text generation.
+    Invokes the AWS Bedrock model (Claude, DeepSeek, or Amazon Nova) for text generation.
     Args:
         model_id: The ID of the Bedrock model to use.
         prompt: The input prompt for the model.
@@ -130,7 +130,52 @@ def invoke_bedrock_model(
                         f"Received empty response body from model {model_id}.")
                 response_body = json.loads(
                     response_body_raw_bytes.decode('utf-8'))
-                generated_text = response_body.get("content") or response_body.get("completion")
+                generated_text = response_body.get(
+                    "content") or response_body.get("completion")
+                if generated_text is None:
+                    raise ValueError(
+                        f"Failed to parse or extract generated text from model {model_id}. Response body: {response_body}")
+                return generated_text
+
+            elif model_id.startswith("amazon.nova"):
+                request_body = {
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                }
+                content_type = "application/json"
+                accept = "application/json"
+
+                response_obj = client.invoke_model(
+                    modelId=model_id,
+                    body=json.dumps(request_body),
+                    accept=accept,
+                    contentType=content_type
+                )
+                response_body_raw_bytes = response_obj.get("body").read()
+                if not response_body_raw_bytes:
+                    raise ValueError(
+                        f"Received empty response body from model {model_id}.")
+                response_body = json.loads(
+                    response_body_raw_bytes.decode('utf-8'))
+
+                # Nova models return content in the "content" field like Claude
+                generated_text = response_body.get("content")
+                if generated_text is None:
+                    # Try to extract from message structure if content is not directly available
+                    output = response_body.get("output")
+                    if output and output.get("message"):
+                        content_blocks = output["message"].get("content", [])
+                        if content_blocks and isinstance(content_blocks, list) and len(content_blocks) > 0:
+                            first_content = content_blocks[0]
+                            if isinstance(first_content, dict):
+                                generated_text = first_content.get("text")
+                            elif isinstance(first_content, str):
+                                generated_text = first_content
+
                 if generated_text is None:
                     raise ValueError(
                         f"Failed to parse or extract generated text from model {model_id}. Response body: {response_body}")
@@ -170,12 +215,14 @@ def invoke_bedrock_model(
                     f"Failed to parse or extract generated text from model {model_id}. Response body: {response_body}")
 
             else:
-                raise ValueError(f"Unsupported model_id: {model_id}. Only Claude and DeepSeek are supported.")
+                raise ValueError(
+                    f"Unsupported model_id: {model_id}. Only Claude, DeepSeek, and Amazon Nova are supported.")
 
         except ClientError as e:
             if e.response['Error']['Code'] == 'ThrottlingException':
                 if attempt < max_retries - 1:
-                    delay = min(max_delay, base_delay * (2 ** attempt) + random.uniform(0, 1))
+                    delay = min(max_delay, base_delay *
+                                (2 ** attempt) + random.uniform(0, 1))
                     logger.warning(
                         f"ThrottlingException encountered for model {model_id}. Retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})...")
                     time.sleep(delay)
@@ -191,14 +238,17 @@ def invoke_bedrock_model(
                 logger.error(
                     f"ClientError when invoking Bedrock model {model_id}: {e}")
                 if response_obj and hasattr(response_obj.get("body"), "read"):
-                    error_response_body = response_obj.get("body").read().decode('utf-8', errors='ignore')
-                    logger.error(f"Error response body from Bedrock: {error_response_body}")
+                    error_response_body = response_obj.get(
+                        "body").read().decode('utf-8', errors='ignore')
+                    logger.error(
+                        f"Error response body from Bedrock: {error_response_body}")
                 return None
         except BotoCoreError as e:
             logger.error(
                 f"BotoCoreError when invoking Bedrock model {model_id}: {e}")
             if attempt < max_retries - 1:
-                delay = min(max_delay, base_delay * (2 ** attempt) + random.uniform(0, 1))
+                delay = min(max_delay, base_delay *
+                            (2 ** attempt) + random.uniform(0, 1))
                 logger.warning(
                     f"BotoCoreError encountered. Retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(delay)
@@ -210,14 +260,17 @@ def invoke_bedrock_model(
             logger.error(f"No AWS credentials found. Please configure them.")
             return None
         except PartialCredentialsError:
-            logger.error(f"Incomplete AWS credentials. Please check your configuration.")
+            logger.error(
+                f"Incomplete AWS credentials. Please check your configuration.")
             return None
         except Exception as e:
             logger.error(
                 f"Unexpected error invoking Bedrock model {model_id}: {e}")
             if response_obj and hasattr(response_obj.get("body"), "read"):
-                error_response_body = response_obj.get("body").read().decode('utf-8', errors='ignore')
-                logger.error(f"Error response body (if any) during unexpected error: {error_response_body}")
+                error_response_body = response_obj.get(
+                    "body").read().decode('utf-8', errors='ignore')
+                logger.error(
+                    f"Error response body (if any) during unexpected error: {error_response_body}")
             return None
 
     return None
